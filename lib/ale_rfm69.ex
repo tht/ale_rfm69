@@ -3,22 +3,67 @@ defmodule AleRFM69 do
   Documentation for AleRFM69.
   """
 
-  # @interrupt 1013
+  use GenServer
+  require Logger
 
-  # Sets up SPI process
-  def setup do
-    Spi.start_link("spidev32766.0")
+  @interrupt 1013
+
+  def start_link do
+    Logger.info "Starting RFM69 driver process"
+    GenServer.start_link(__MODULE__, { }, name: __MODULE__)
+  end
+
+  def init(_args) do
+    with {:ok, pid} <- Spi.start_link("spidev32766.0"),
+         {:ok, int} <- Gpio.start_link(@interrupt, :input),
+         :ok <- Gpio.set_int(int, :both)
+      do
+        Process.link pid
+        Process.link int
+        {:ok, %{ pid: pid }}
+      else
+        _ -> {:error, :init_failed}
+    end
+  end
+
+  def read_reg(addr) do
+    GenServer.call __MODULE__, {:read_reg, addr}
+  end
+
+  def dump_conf do
+    GenServer.call __MODULE__, {:dump_conf}
+  end
+
+  def get_pid do
+    GenServer.call __MODULE__, {:get_pid}
   end
 
   # Read a single register and return content as number
-  def read_reg(pid, addr) do
+  defp read_reg_i(pid, addr) do
     << _ :: size(8), res :: size(8) >> = Spi.transfer(pid, << 0 :: size(1), addr :: size(7), 0x00>>)
     res
   end
 
+  def handle_call({:read_reg, addr}, _from, %{pid: pid} = state) do
+    {:reply, read_reg_i(pid, addr), state}
+  end
+
+  def handle_call({:get_pid}, _from, %{pid: pid} = state) do
+    {:reply, pid, state}
+  end
+  
+  def handle_call({:dump_conf}, _from, %{pid: pid} = state) do
+    {:reply, output_registers(pid), state}
+  end
+
+  def handle_info({:gpio_interrupt, _pin, dir}, state) do
+    Logger.info "Interrupt received: #{inspect dir}"
+    {:noreply, state}
+  end
+
   # Read a single register (except for 0x00) and return content as hex
   defp reg_as_hex(_pid, 0x00), do: "--"
-  defp reg_as_hex(pid, addr), do: pid |> read_reg(addr) |> Integer.to_string(16) |> String.pad_leading(2, "0")
+  defp reg_as_hex(pid, addr), do: pid |> read_reg_i(addr) |> Integer.to_string(16) |> String.pad_leading(2, "0")
 
   # Dump all registers to stdout
   def output_registers(pid, base \\ -1)
