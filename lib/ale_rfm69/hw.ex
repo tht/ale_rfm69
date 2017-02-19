@@ -47,4 +47,17 @@ defmodule AleRFM69.HW do
     end
   end
 
+  # Test interrupts - switch into FS mode and configure DIO0 to get an interrupt
+  def test_interrupt(pid) do
+    old_mode = write_register({0x01, 0x08}, pid)
+    old_dio = write_register({0x25, 0x31+0xC0}, pid)
+    receive do
+      {:gpio_interrupt, _, :rising} -> write_register({0x01, old_mode}, pid)
+                                       write_register({0x25, old_dio}, pid)
+                                       :ok
+    after
+      1000 -> :error
+    end
+  end
+
 end

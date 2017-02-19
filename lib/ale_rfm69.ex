@@ -18,7 +18,7 @@ defmodule AleRFM69 do
   def init(_args) do
     with {:ok, pid} <- Spi.start_link("spidev32766.0", speed_hz: 4000000),
          {:ok, int} <- Gpio.start_link(@interrupt, :input),
-         :ok <- Gpio.set_int(int, :both)
+         :ok <- Gpio.set_int(int, :both) # registering on *raising* only does not work
       do
         Process.link pid
         Process.link int
@@ -59,6 +59,7 @@ defmodule AleRFM69 do
   end
 
   def handle_call({:setup, %{group_id: group, frequency: freq}}, _from, %{pid: pid} = state) do
+    :ok = reset @reset
     [ {0x01, 0x04}, # opmode: STDBY
       {0x02, 0x00}, # packet mode, fsk
       {0x03, [0x02, 0x8A]}, # bit rate 49,261 hz
@@ -79,8 +80,10 @@ defmodule AleRFM69 do
       {0x3C, 0x8F}, # fifo thres
       {0x3D, 0x12}, # PacketConfig2, interpkt = 1, autorxrestart on
       {0x6F, 0x20}, # Test DAGC
-      # {0x71, 0x02}, # RegTestAfc
+      # {0x71, 0x02}, #     ] |> write_registers(pid)
     ] |> write_registers(pid)
+
+    :ok = test_interrupt(pid)
     {:reply, :ok, state}
   end
 
@@ -98,8 +101,10 @@ defmodule AleRFM69 do
 
   def handle_call({:reset_module}, _from, state), do: {:reply,reset(@reset), state}
 
-  def handle_info({:gpio_interrupt, _pin, dir}, state) do
-    Logger.info "Interrupt received: #{inspect dir}"
+  def handle_info({:gpio_interrupt, _pin, :falling}, state), do: {:noreply, state}
+
+  def handle_info({:gpio_interrupt, _pin, :rising}, state) do
+    Logger.info "Interrupt received!"
     {:noreply, state}
   end
 
