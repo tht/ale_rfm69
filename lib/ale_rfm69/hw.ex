@@ -27,7 +27,7 @@ defmodule AleRFM69.HW do
   end
 
   # Read a single register and return content as number
-  def read_register(pid, addr) do
+  def read_register(addr, pid) do
     << _ :: size(8), res :: size(8) >> = Spi.transfer(pid, << 0 :: size(1), addr :: size(7), 0x00>>)
     res
   end
@@ -48,9 +48,10 @@ defmodule AleRFM69.HW do
   end
 
   # Test interrupts - switch into FS mode and configure DIO0 to get an interrupt
-  def test_interrupt(pid) do
-    old_mode = write_register({0x01, 0x08}, pid)
-    old_dio = write_register({0x25, 0x31+0xC0}, pid)
+  def test_interrupt(pid, _int_pid) do
+    old_dio  = write_register({0x25, 0x00}, pid) # no interrupts
+    old_mode = write_register({0x01, 0x08}, pid) # change mode (add busywaiting here until modeready == 1
+    write_register({0x25, 0xC0}, pid)
     receive do
       {:gpio_interrupt, _, :rising} -> write_register({0x01, old_mode}, pid)
                                        write_register({0x25, old_dio}, pid)
