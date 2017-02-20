@@ -162,7 +162,8 @@ defmodule AleRFM69 do
       Logger.info "Fetching payload..."
       << _ :: size(8), len :: size(8),  payload :: binary-size(len), _::binary >> =
         Spi.transfer(pid, String.duplicate(<<0>>, 67))
-      Logger.info "Received (len #{len}): #{inspect payload}"
+      res = for << d :: size(8) <- payload >>, do: d |> Integer.to_string( 16) |> String.pad_leading(2, "0")
+      Logger.info "Received (len #{len}): #{res |> Enum.join(" ")}"
     end
     {:noreply, state}
   end
