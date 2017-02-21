@@ -16,6 +16,7 @@ defmodule AleRFM69 do
   """
 
   use GenServer
+  use Bitwise
   require Logger
   import AleRFM69.HW
 
@@ -159,20 +160,30 @@ defmodule AleRFM69 do
     << fifo_full :: size(1), fifo_not_empty :: size(1), fifo_level :: size(1), fifo_overrun :: size(1),
        packet_sent :: size(1), payload_ready :: size(1), crc_ok :: size(1), low_bat :: size(1) >>
        = << read_register(0x28, pid) >>
-    flags = %{
+    _flags = %{
       mode_ready: mode_ready, rx_ready: rx_ready, tx_ready: tx_ready, pll_lock: pll_lock,
       rssi: rssi, timeout: timeout, auto_mode: auto_mode, sync_match: sync_match,
       fifo_full: fifo_full, fifo_not_empty: fifo_not_empty, fifo_level: fifo_level, fifo_overrun: fifo_overrun,
       packet_sent: packet_sent, payload_ready: payload_ready, crc_ok: crc_ok, low_bat: low_bat
     }
-    Logger.debug "RqgIrqFlags: #{inspect flags}"
-    if payload_ready == 1 do
-      Logger.info "Fetching payload..."
-      << _ :: size(8), len :: size(8),  payload :: binary-size(len), _::binary >> =
-        Spi.transfer(pid, String.duplicate(<<0>>, 67))
-      res = for << d :: size(8) <- payload >>, do: d |> Integer.to_string( 16) |> String.pad_leading(2, "0")
-      Logger.info "Received (len #{len}): #{res |> Enum.join(" ")}"
+    #Logger.debug "RqgIrqFlags: #{inspect flags} waiting for payload_ready..."
+    case wait_for( fn() -> 0x04 &&& read_register(0x28, pid) end, 2) do
+      :timeout -> Logger.error "No complete packet in time received"
+                  switch_opmode(pid, :standby)
+		  switch_opmode(pid, :rx)
+                  :timeout
+      res      -> rssi = - read_register(0x24, pid)/2
+                  << fei::integer-signed-size(16) >> = read_2register(0x21, pid)
+		  Logger.info "RSSI: #{rssi}, FEI: #{fei}"
+                  data = Spi.transfer(pid, String.duplicate(<<0>>, 67))
+                  case res &&& 0x04 do
+		    0 -> Logger.info "Received data but CRC is invalid: #{inspect data}"
+		    _ -> << _ :: size(8), len :: size(8),  payload :: binary-size(len), _::binary >> = data
+                         res = for << d :: size(8) <- payload >>, do: d |> Integer.to_string( 16) |> String.pad_leading(2, "0")
+                         Logger.info "Received (len #{len}): #{res |> Enum.join(" ")}"
+		  end
     end
+    
     {:noreply, state}
   end
 

@@ -1,5 +1,6 @@
 defmodule AleRFM69.HW do
   @moduledoc false
+  use Bitwise
 
   def freq_to_register(freq) when freq < 100000000, do: freq_to_register freq * 10
   
@@ -32,6 +33,12 @@ defmodule AleRFM69.HW do
     res
   end
 
+  # Read two registers and return content as number
+  def read_2register(addr, pid) do
+    << _ :: size(8), rest :: binary-size(2) >> = Spi.transfer(pid, << 0 :: size(1), addr :: size(7), 0x00, 0x00>>)
+    rest
+  end
+
   
   def reset(reset_pin) do
     with {:ok, rpid} <- Gpio.start_link(reset_pin, :output),
@@ -62,13 +69,21 @@ defmodule AleRFM69.HW do
   end
 
   # wait a maximum of *timeout* ms (default 10ms) until a function returns *not* nil
-  defp wait_for_modeready(pid, timeout \\ 10)
-  defp wait_for_modeready(pid, timeout) when timeout < 10000, do: wait_for_modeready(pid, :os.system_time(:milli_seconds) + timeout)
-  defp wait_for_modeready(pid, timeout) do
+  # timeout (in ms) is always positive, negative numbers are used internally
+  def wait_for(fun, timeout \\ 10)
+  def wait_for(fun, timeout) when timeout > 0, do: wait_for(fun, 0 - :os.system_time(:milli_seconds) - timeout)
+  def wait_for(fun, timeout) do
     cond do
-      :os.system_time(:milli_seconds) > timeout -> :timeout
-      << 1 :: size(1), _ :: size(7) >> = << read_register(0x27, pid) >> -> :ok
-      true -> wait_for_modeready(pid, timeout)
+      :os.system_time(:milli_seconds) + timeout >= 0 -> :timeout
+      res = fun.() -> res
+      true -> wait_for(fun, timeout)
+    end
+  end
+
+  defp wait_for_modeready(pid) do
+    case wait_for( fn() -> 0x80 &&& read_register(0x27, pid) end, 10) do
+      :timeout -> :timeout
+      _        -> :ok
     end
   end
 
