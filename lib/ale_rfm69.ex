@@ -74,6 +74,10 @@ defmodule AleRFM69 do
     GenServer.call __MODULE__, {:int_state}
   end
 
+  def switch_opmode(mode) do
+    GenServer.call __MODULE__, {:switch_opmode, mode}
+  end
+
   def handle_cast({:write_reg, addr, value}, %{pid: pid} = state) do
     write_register({addr, value}, pid)
     {:noreply, state}
@@ -124,6 +128,10 @@ defmodule AleRFM69 do
     {:reply, irq_test, state}
   end
 
+  def handle_call({:switch_opmode, mode}, _from, %{pid: pid} = state) do
+    {:reply, switch_opmode(pid, mode), state}
+  end
+
   def handle_call({:read_reg, addr}, _from, %{pid: pid} = state) do
     {:reply, read_register(addr, pid), state}
   end
@@ -158,7 +166,7 @@ defmodule AleRFM69 do
       packet_sent: packet_sent, payload_ready: payload_ready, crc_ok: crc_ok, low_bat: low_bat
     }
     Logger.debug "RqgIrqFlags: #{inspect flags}"
-    if payload_ready do
+    if payload_ready == 1 do
       Logger.info "Fetching payload..."
       << _ :: size(8), len :: size(8),  payload :: binary-size(len), _::binary >> =
         Spi.transfer(pid, String.duplicate(<<0>>, 67))

@@ -61,4 +61,37 @@ defmodule AleRFM69.HW do
     end
   end
 
+  # wait a maximum of *timeout* ms (default 10ms) until a function returns *not* nil
+  defp wait_for_modeready(pid, timeout \\ 10)
+  defp wait_for_modeready(pid, timeout) when timeout < 10000, do: wait_for_modeready(pid, :os.system_time(:milli_seconds) + timeout)
+  defp wait_for_modeready(pid, timeout) do
+    cond do
+      :os.system_time(:milli_seconds) > timeout -> :timeout
+      << 1 :: size(1), _ :: size(7) >> = << read_register(0x27, pid) >> -> :ok
+      true -> wait_for_modeready(pid, timeout)
+    end
+  end
+
+  def switch_opmode(pid, mode, _diomapping \\ -1)
+  def switch_opmode(pid, :sleep, _diomapping) do
+    # Disable all interrupt sources and switch mode
+    write_register {0x25, 0x00}, pid
+    write_register {0x01, 0x00}, pid
+    wait_for_modeready pid
+  end
+
+  def switch_opmode(pid, :standby, _diomapping) do
+    # Disable all interrupt sources and switch mode
+    write_register {0x25, 0x00}, pid
+    write_register {0x01, 0x04}, pid
+    wait_for_modeready pid
+  end
+
+  def switch_opmode(pid, :rx, _diomapping) do
+    # Interrupt on rssi and switch mode
+    write_register {0x25, 0x80}, pid
+    write_register {0x01, 0x10}, pid
+    wait_for_modeready pid
+  end
+
 end
