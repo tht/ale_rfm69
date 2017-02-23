@@ -98,8 +98,7 @@ defmodule AleRFM69 do
     {:reply, flags1, state}
   end
 
-  def handle_call({:setup, %{group_id: group, frequency: freq}}, _from, %{pid: pid} = state) do
-    :ok = reset @reset # do a full reset first
+  def handle_call({:setup, %{group_id: group, frequency: freq}}, _from, %{pid: pid, int: int} = state) do
     [ {0x01, 0x04}, # opmode: STDBY
       {0x02, 0x00}, # packet mode, fsk
       {0x03, [0x02, 0x8A]}, # bit rate 49,261 hz
@@ -124,7 +123,7 @@ defmodule AleRFM69 do
       # {0x71, 0x02}, #     ] |> write_registers(pid)
     ] |> write_registers(pid)
 
-    irq_test = :ok #test_interrupt(pid, int)
+    irq_test = test_interrupt(pid, int)
     {:reply, irq_test, state}
   end
 
@@ -151,10 +150,10 @@ defmodule AleRFM69 do
     switch_opmode(pid, :rx)
   end
 
-  #def handle_info({:gpio_interrupt, _pin, :falling}, state) do
-  #  Logger.info "Interrupt fallen"
-  #  {:noreply, state}
-  #end
+  def handle_info({:gpio_interrupt, _pin, :falling}, state) do
+    Logger.warn "Interrupt falling received - but it is disabled..."
+    {:noreply, state}
+  end
 
   def handle_info({:gpio_interrupt, pin, :rising = dir}, %{pid: pid, int: int} = state) do
     #<< mode_ready :: size(1), rx_ready :: size(1), tx_ready :: size(1), pll_lock :: size(1),
@@ -170,28 +169,32 @@ defmodule AleRFM69 do
     #  packet_sent: packet_sent, payload_ready: payload_ready, crc_ok: crc_ok, low_bat: low_bat
     #}
     case wait_for( fn() -> 
-        case <<read_register(0x28, pid)>> do
-          << _::size(5), 1::size(1), _::size(2) >>=reg -> reg
+        case read_2register(0x27, pid) do
+          << _::size(13), 1::size(1), _::size(2)  >>=reg -> reg
+          << _::size(4),  0::size(1), _::size(11) >> -> :carrier_lost
           _ -> false
         end
-      end, 10) do
-      :timeout -> Logger.error "No complete packet in time received"
+      end, 12) do
+      :timeout -> Logger.info "Receiving aborted: timeout"
                   reset_receiver(pid)
                   :timeout
+      :carrier_lost -> Logger.warn "Receiving aborted: carrier lost"
+                  :carrier_lost
       res      -> rssi = - read_register(0x24, pid)/2
                   << fei::integer-signed-size(16) >> = read_2register(0x21, pid)
-		  Logger.info "RSSI: #{rssi}, FEI: #{fei}"
+		  stats = "RSSI: #{rssi}, FEI: #{fei}"
                   data = Spi.transfer(pid, String.duplicate(<<0>>, 67))
                   case res do
-                    << _::size(6), 1::size(1), _::size(1) >> ->
+                    << _::size(14), 1::size(1), _::size(1) >> ->
 		         << _ :: size(8), len :: size(8),  payload :: binary-size(len), _::binary >> = data
                          res = for << d :: size(8) <- payload >>, do: d |> Integer.to_string( 16) |> String.pad_leading(2, "0")
-                         Logger.info "Received (len #{len}): #{res |> Enum.join(" ")}"
-		    _ -> Logger.info "Received data but CRC is invalid: #{inspect data}"
+                         Logger.info "#{stats}: (len #{len}) #{res |> Enum.join(" ")}"
+		    _ -> Logger.info "#{stats}: CRC invalid on: #{inspect data}"
 		  end
     end
     case Gpio.read(int) do
-      1 -> handle_info({:gpio_interrupt, pin, dir}, state)
+      1 -> Logger.warn "Still an interrupt pending, checking again"
+           handle_info({:gpio_interrupt, pin, dir}, state)
       _ -> {:noreply, state}
     end
   end
