@@ -6,9 +6,7 @@ defmodule AleRFM69 do
   {:ok, pid} = AleRFM69.start_link
   AleRFM69.setup %{group_id: 0x2a, frequency: 8683}
 
-  # Register for sync interrupts and start receiving
-  AleRFM69.write_reg 0x27, 0x80
-  AleRFM69.write_reg 0x01, 0x10
+  AleRFM69.switch_opmode :rx
 
   # Reducte RSSI threshold
   AleRFM69.write_reg 0x29, 0xC4
@@ -32,6 +30,7 @@ defmodule AleRFM69 do
     with {:ok, pid} <- Spi.start_link("spidev32766.0", speed_hz: 4000000),
          {:ok, int} <- Gpio.start_link(@interrupt, :input),
          :ok <- Gpio.set_int(int, :none), # registering on *raising* only does not work
+         :ok <- reset(@reset), # do a full reset first
          :ok <- Gpio.set_int(int, :rising)  # registering on *raising* only does not work
       do
         Process.link pid
@@ -147,44 +146,54 @@ defmodule AleRFM69 do
 
   def handle_call({:reset_module}, _from, state), do: {:reply,reset(@reset), state}
 
-  #def handle_info({:gpio_interrupt, _pin, :okfalling}, state) do
+  defp reset_receiver(pid) do
+    switch_opmode(pid, :standby)
+    switch_opmode(pid, :rx)
+  end
+
+  #def handle_info({:gpio_interrupt, _pin, :falling}, state) do
   #  Logger.info "Interrupt fallen"
   #  {:noreply, state}
   #end
 
-  def handle_info({:gpio_interrupt, _pin, dir}, %{pid: pid} = state) do
-    Logger.info "Interrupt received! #{inspect dir}"
-    << mode_ready :: size(1), rx_ready :: size(1), tx_ready :: size(1), pll_lock :: size(1),
-       rssi :: size(1), timeout :: size(1), auto_mode :: size(1), sync_match :: size(1) >>
-       = << read_register(0x27, pid) >>
-    << fifo_full :: size(1), fifo_not_empty :: size(1), fifo_level :: size(1), fifo_overrun :: size(1),
-       packet_sent :: size(1), payload_ready :: size(1), crc_ok :: size(1), low_bat :: size(1) >>
-       = << read_register(0x28, pid) >>
-    _flags = %{
-      mode_ready: mode_ready, rx_ready: rx_ready, tx_ready: tx_ready, pll_lock: pll_lock,
-      rssi: rssi, timeout: timeout, auto_mode: auto_mode, sync_match: sync_match,
-      fifo_full: fifo_full, fifo_not_empty: fifo_not_empty, fifo_level: fifo_level, fifo_overrun: fifo_overrun,
-      packet_sent: packet_sent, payload_ready: payload_ready, crc_ok: crc_ok, low_bat: low_bat
-    }
-    #Logger.debug "RqgIrqFlags: #{inspect flags} waiting for payload_ready..."
-    case wait_for( fn() -> 0x04 &&& read_register(0x28, pid) end, 2) do
+  def handle_info({:gpio_interrupt, pin, :rising = dir}, %{pid: pid, int: int} = state) do
+    #<< mode_ready :: size(1), rx_ready :: size(1), tx_ready :: size(1), pll_lock :: size(1),
+    #   rssi :: size(1), timeout :: size(1), auto_mode :: size(1), sync_match :: size(1) >>
+    #   = << read_register(0x27, pid) >>
+    #<< fifo_full :: size(1), fifo_not_empty :: size(1), fifo_level :: size(1), fifo_overrun :: size(1),
+    #   packet_sent :: size(1), payload_ready :: size(1), crc_ok :: size(1), low_bat :: size(1) >>
+    #   = << read_register(0x28, pid) >>
+    #flags = %{
+    #  mode_ready: mode_ready, rx_ready: rx_ready, tx_ready: tx_ready, pll_lock: pll_lock,
+    #  rssi: rssi, timeout: timeout, auto_mode: auto_mode, sync_match: sync_match,
+    #  fifo_full: fifo_full, fifo_not_empty: fifo_not_empty, fifo_level: fifo_level, fifo_overrun: fifo_overrun,
+    #  packet_sent: packet_sent, payload_ready: payload_ready, crc_ok: crc_ok, low_bat: low_bat
+    #}
+    case wait_for( fn() -> 
+        case <<read_register(0x28, pid)>> do
+          << _::size(5), 1::size(1), _::size(2) >>=reg -> reg
+          _ -> false
+        end
+      end, 10) do
       :timeout -> Logger.error "No complete packet in time received"
-                  switch_opmode(pid, :standby)
-		  switch_opmode(pid, :rx)
+                  reset_receiver(pid)
                   :timeout
       res      -> rssi = - read_register(0x24, pid)/2
                   << fei::integer-signed-size(16) >> = read_2register(0x21, pid)
 		  Logger.info "RSSI: #{rssi}, FEI: #{fei}"
                   data = Spi.transfer(pid, String.duplicate(<<0>>, 67))
-                  case res &&& 0x04 do
-		    0 -> Logger.info "Received data but CRC is invalid: #{inspect data}"
-		    _ -> << _ :: size(8), len :: size(8),  payload :: binary-size(len), _::binary >> = data
+                  case res do
+                    << _::size(6), 1::size(1), _::size(1) >> ->
+		         << _ :: size(8), len :: size(8),  payload :: binary-size(len), _::binary >> = data
                          res = for << d :: size(8) <- payload >>, do: d |> Integer.to_string( 16) |> String.pad_leading(2, "0")
                          Logger.info "Received (len #{len}): #{res |> Enum.join(" ")}"
+		    _ -> Logger.info "Received data but CRC is invalid: #{inspect data}"
 		  end
     end
-    
-    {:noreply, state}
+    case Gpio.read(int) do
+      1 -> handle_info({:gpio_interrupt, pin, dir}, state)
+      _ -> {:noreply, state}
+    end
   end
 
   # Read a single register (except for 0x00) and return content as hex
