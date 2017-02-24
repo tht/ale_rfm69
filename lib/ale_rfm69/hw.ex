@@ -1,45 +1,50 @@
 defmodule AleRFM69.HW do
   @moduledoc false
-  use Bitwise
+  use Bitwise, only_operators: true
 
+  # Convert a frequency entered by the user into the coresponding value for the register
   def freq_to_register(freq) when freq < 100000000, do: freq_to_register freq * 10
-  
   def freq_to_register(freq) do
-    <<f1, f2, f3>> = << round(freq / 61.03515625) :: size(24) >>
+    <<f1, f2, f3>> = <<round(freq / 61.03515625) :: size(24)>>
     [f1, f2, f3]
   end
 
-  def write_registers({_addr, _val}=data, pid), do: write_register data, pid
+  # Writes a list of register values into the registers
   def write_registers([head | []], pid), do: write_register head, pid
   def write_registers([head | rest], pid) do
     write_register head, pid
     write_registers rest, pid
   end
 
-  # @compile {:inline, write_register: 2}
+  # Writes multiple values starting from one register address
   def write_register({addr, val}, pid) when is_list(val) do
-    data = [<< 1 :: size(1), addr :: size(7)>> | Enum.map(val, &(<<&1>>)) ] |> Enum.join
-    Spi.transfer(pid, data)
+    data = [<<1 :: size(1), addr :: size(7)>> | Enum.map(val, &(<<&1>>)) ] |> Enum.join
+    <<_::size(8), res::bitstring>> = Spi.transfer(pid, data)
+    res
   end
 
+  # Write a single value to a register
   def write_register({addr, val}, pid) do
-    << _ :: size(8), res :: size(8) >> = Spi.transfer(pid, << 1 :: size(1), addr :: size(7), val>>)
+    <<_::size(8), res::bitstring>> = Spi.transfer(pid, <<1 :: size(1), addr :: size(7), val>>)
     res
   end
 
-  # Read a single register and return content as number
+  # Read a single register
   def read_register(addr, pid) do
-    << _ :: size(8), res :: size(8) >> = Spi.transfer(pid, << 0 :: size(1), addr :: size(7), 0x00>>)
+    <<_ :: size(8), res :: bitstring>> = Spi.transfer(pid, << 0 :: size(1), addr :: size(7), 0x00>>)
     res
   end
 
-  # Read two registers and return content as number
+  # Convert bitstring from register into an uint_8 value
+  def reg_to_uint(<<val::size(8)>>), do: val
+
+  # Read two registers
   def read_2register(addr, pid) do
-    << _ :: size(8), rest :: binary-size(2) >> = Spi.transfer(pid, << 0 :: size(1), addr :: size(7), 0x00, 0x00>>)
+    <<_::size(8), rest::binary>> = Spi.transfer(pid, <<0 :: size(1), addr :: size(7), 0x00, 0x00>>)
     rest
   end
 
-  
+  # Do a full hardware reset
   def reset(reset_pin) do
     with {:ok, rpid} <- Gpio.start_link(reset_pin, :output),
           :ok        <- Gpio.write(rpid, 1),
@@ -56,8 +61,8 @@ defmodule AleRFM69.HW do
 
   # Test interrupts - switch into FS mode and configure DIO0 to get an interrupt
   def test_interrupt(pid, _int_pid) do
-    old_dio  = write_register({0x25, 0x00}, pid) # no interrupts
-    old_mode = write_register({0x01, 0x08}, pid) # change mode (add busywaiting here until modeready == 1
+    old_dio  = write_register({0x25, 0x00}, pid) |> reg_to_uint # no interrupts
+    old_mode = write_register({0x01, 0x08}, pid) |> reg_to_uint # change mode (add busywaiting here until modeready == 1
     write_register({0x25, 0xC0}, pid)
     receive do
       {:gpio_interrupt, _, :rising} -> write_register({0x01, old_mode}, pid)
@@ -81,7 +86,12 @@ defmodule AleRFM69.HW do
   end
 
   defp wait_for_modeready(pid) do
-    case wait_for( fn() -> 0x80 &&& read_register(0x27, pid) end, 10) do
+    case wait_for( fn() -> 
+        case read_register(0x27, pid) do
+          <<1::size(1), _::size(7)>>=reg -> reg
+          _ -> false
+        end
+      end, 12) do
       :timeout -> :timeout
       _        -> :ok
     end

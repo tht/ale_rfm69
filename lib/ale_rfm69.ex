@@ -14,7 +14,7 @@ defmodule AleRFM69 do
   """
 
   use GenServer
-  use Bitwise
+  use Bitwise, only_operators: true
   require Logger
   import AleRFM69.HW
 
@@ -90,7 +90,7 @@ defmodule AleRFM69 do
   def handle_call({:int_state}, _from, %{pid: pid} = state) do
     << mode_ready :: size(1), rx_ready :: size(1), tx_ready :: size(1), pll_lock :: size(1),
        rssi :: size(1), timeout :: size(1), auto_mode :: size(1), sync_match :: size(1) >>
-       = << read_register(0x27, pid) >>
+       = read_register(0x27, pid)
     flags1 = %{
       mode_ready: mode_ready, rx_ready: rx_ready, tx_ready: tx_ready, pll_lock: pll_lock,
       rssi: rssi, timeout: timeout, auto_mode: auto_mode, sync_match: sync_match
@@ -156,18 +156,6 @@ defmodule AleRFM69 do
   end
 
   def handle_info({:gpio_interrupt, pin, :rising = dir}, %{pid: pid, int: int} = state) do
-    #<< mode_ready :: size(1), rx_ready :: size(1), tx_ready :: size(1), pll_lock :: size(1),
-    #   rssi :: size(1), timeout :: size(1), auto_mode :: size(1), sync_match :: size(1) >>
-    #   = << read_register(0x27, pid) >>
-    #<< fifo_full :: size(1), fifo_not_empty :: size(1), fifo_level :: size(1), fifo_overrun :: size(1),
-    #   packet_sent :: size(1), payload_ready :: size(1), crc_ok :: size(1), low_bat :: size(1) >>
-    #   = << read_register(0x28, pid) >>
-    #flags = %{
-    #  mode_ready: mode_ready, rx_ready: rx_ready, tx_ready: tx_ready, pll_lock: pll_lock,
-    #  rssi: rssi, timeout: timeout, auto_mode: auto_mode, sync_match: sync_match,
-    #  fifo_full: fifo_full, fifo_not_empty: fifo_not_empty, fifo_level: fifo_level, fifo_overrun: fifo_overrun,
-    #  packet_sent: packet_sent, payload_ready: payload_ready, crc_ok: crc_ok, low_bat: low_bat
-    #}
     case wait_for( fn() -> 
         case read_2register(0x27, pid) do
           << _::size(13), 1::size(1), _::size(2)  >>=reg -> reg
@@ -180,7 +168,7 @@ defmodule AleRFM69 do
                   :timeout
       :carrier_lost -> Logger.warn "Receiving aborted: carrier lost"
                   :carrier_lost
-      res      -> rssi = - read_register(0x24, pid)/2
+      res      -> rssi = read_register(0x24, pid) |> reg_to_uint |> Kernel.*(-0.5)
                   << fei::integer-signed-size(16) >> = read_2register(0x21, pid)
 		  stats = "RSSI: #{rssi}, FEI: #{fei}"
                   data = Spi.transfer(pid, String.duplicate(<<0>>, 67))
@@ -201,7 +189,7 @@ defmodule AleRFM69 do
 
   # Read a single register (except for 0x00) and return content as hex
   defp reg_as_hex(_pid, 0x00), do: "--"
-  defp reg_as_hex(pid, addr), do: addr |> read_register(pid) |> Integer.to_string(16) |> String.pad_leading(2, "0")
+  defp reg_as_hex(pid, addr), do: addr |> read_register(pid) |> reg_to_uint |> Integer.to_string(16) |> String.pad_leading(2, "0")
 
   # Dump all registers to stdout
   def output_registers(pid, base \\ -1)
