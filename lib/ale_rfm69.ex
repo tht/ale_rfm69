@@ -91,6 +91,14 @@ Process.send_after(self(), {:"$gen_cast", {:dump_int} }, 1000)
     {:noreply, state}
   end
 
+  def handle_cast({:rssi, val}, %{pid: pid}=state) do
+    << rssi :: size(8) >> = read_register(0x29, pid)
+    new_rssi = rssi + val
+    Logger.warn "RSSI threshold changed to: -#{new_rssi/2}"
+    write_register {0x29, new_rssi}, pid
+    {:noreply, state}
+  end
+
   def handle_call({:int_level}, _from, %{int: int} = state) do
     {:reply, Gpio.read(int), state}
   end
@@ -116,8 +124,8 @@ Process.send_after(self(), {:"$gen_cast", {:dump_int} }, 1000)
       {0x19, [0x42, 0x42]}, # RxBw 125khz, AFCBw 125khz
       {0x1E, 0x0C}, # AFC auto-clear, auto-on
       {0x26, 0x07}, # disable clkout
-      # {0x29, 0xC4}, # RSSI thres -98dB
-      {0x29, 0xE4}, # RSSI thres 
+      {0x29, 0xC4}, # RSSI thres -98dB
+      #{0x29, 0xE4}, # RSSI thres 
       {0x2B, 0x40}, # RSSI timeout after 128 bytes
       {0x2D, 0x05}, # Preamble 5 bytes
       {0x2E, 0x88}, # sync size 2 bytes
@@ -167,41 +175,46 @@ Process.send_after(self(), {:"$gen_cast", {:dump_int} }, 1000)
   end
 
   def handle_info({:gpio_interrupt, pin, :rising = dir}, %{pid: pid, int: int} = state) do
-    :interrupts |> Stats.add_type
-    case wait_for( fn() -> 
-        case read_2register(0x27, pid) do
-          << _::size(13), 1::size(1), _::size(2)  >>=reg -> reg
-          << _::size(4),  0::size(1), _::size(11) >> -> :carrier_lost
-          _ -> false
-        end
-      end, 12) do
-      :timeout -> Logger.info "Receiving aborted: timeout"
-                  reset_receiver(pid)
-                  :timeout |> Stats.add_type
-                  :timeout
-      :carrier_lost -> Logger.warn "Receiving aborted: carrier lost"
-                  :timeout |> Stats.add_type
-                  :carrier_lost
-      res      -> rssi = read_register(0x24, pid) |> reg_to_uint |> Kernel.*(-0.5)
-                  << fei::integer-signed-size(16) >> = read_2register(0x21, pid)
-		  stats = "RSSI: #{rssi}, FEI: #{fei}"
-                  data = Spi.transfer(pid, String.duplicate(<<0>>, 67))
-                  case res do
-                    << _::size(14), 1::size(1), _::size(1) >> ->
-		         << _ :: size(8), len :: size(8),  payload :: binary-size(len), _::binary >> = data
-                         res = for << d :: size(8) <- payload >>, do: d |> Integer.to_string( 16) |> String.pad_leading(2, "0")
-                         :crc_ok |> Stats.add_type
-                         Logger.info "#{stats}: (len #{len}) #{res |> Enum.join(" ")}"
-		    _ -> Logger.info "#{stats}: CRC invalid on: #{inspect data}"
-                         :crc_failed |> Stats.add_type
-		  end
-    end
-    case Gpio.read(int) do
-      1 -> Logger.warn "Still an interrupt pending, checking again"
-           handle_info({:gpio_interrupt, pin, dir}, state)
-      _ -> {:noreply, state}
-    end
+    RSSIFinder.irq_thrown
+    reset_receiver(pid)
+    {:noreply, state}
   end
+
+#    :interrupts |> Stats.add_type
+#    case wait_for( fn() -> 
+#        case read_2register(0x27, pid) do
+#          << _::size(13), 1::size(1), _::size(2)  >>=reg -> reg
+#          << _::size(4),  0::size(1), _::size(11) >> -> :carrier_lost
+#          _ -> false
+#        end
+#      end, 12) do
+#      :timeout -> Logger.info "Receiving aborted: timeout"
+#                  reset_receiver(pid)
+#                  :timeout |> Stats.add_type
+#                  :timeout
+#      :carrier_lost -> Logger.warn "Receiving aborted: carrier lost"
+#                  :timeout |> Stats.add_type
+#                  :carrier_lost
+#      res      -> rssi = read_register(0x24, pid) |> reg_to_uint |> Kernel.*(-0.5)
+#                  << fei::integer-signed-size(16) >> = read_2register(0x21, pid)
+#		  stats = "RSSI: #{rssi}, FEI: #{fei}"
+#                  data = Spi.transfer(pid, String.duplicate(<<0>>, 67))
+#                  case res do
+#                    << _::size(14), 1::size(1), _::size(1) >> ->
+#		         << _ :: size(8), len :: size(8),  payload :: binary-size(len), _::binary >> = data
+#                         res = for << d :: size(8) <- payload >>, do: d |> Integer.to_string( 16) |> String.pad_leading(2, "0")
+#                         :crc_ok |> Stats.add_type
+#                         Logger.info "#{stats}: (len #{len}) #{res |> Enum.join(" ")}"
+#		    _ -> Logger.info "#{stats}: CRC invalid on: #{inspect data}"
+#                         :crc_failed |> Stats.add_type
+#		  end
+#    end
+#    case Gpio.read(int) do
+#      1 -> Logger.warn "Still an interrupt pending, checking again"
+#           handle_info({:gpio_interrupt, pin, dir}, state)
+#      _ -> {:noreply, state}
+#    end
+#  end
 
   # Read a single register (except for 0x00) and return content as hex
   defp reg_as_hex(_pid, 0x00), do: "--"
