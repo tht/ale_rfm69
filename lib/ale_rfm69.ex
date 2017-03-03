@@ -35,6 +35,7 @@ defmodule AleRFM69 do
       do
         Process.link pid
         Process.link int
+Process.send_after(self(), {:"$gen_cast", {:dump_int} }, 1000)
         {:ok, %{ pid: pid, int: int }}
       else
         _ -> {:error, :init_failed}
@@ -83,6 +84,13 @@ defmodule AleRFM69 do
     {:noreply, state}
   end
   
+  def handle_cast({:dump_int}, state) do
+    {:reply, res, state} = handle_call({:int_state}, nil, state)
+    #Process.send_after(self(), {:"$gen_cast", {:dump_int} }, 1000)
+    IO.puts inspect res
+    {:noreply, state}
+  end
+
   def handle_call({:int_level}, _from, %{int: int} = state) do
     {:reply, Gpio.read(int), state}
   end
@@ -115,7 +123,8 @@ defmodule AleRFM69 do
       {0x2E, 0x88}, # sync size 2 bytes
       {0x2F, 0x2D}, # sync1: 0x2D
       {0x30, group}, # sync2: network group
-      {0x37, 0xD0}, # drop pkt if CRC fails
+      {0x37, 0xD8}, # report packets when CRC fails
+      #{0x37, 0xD0}, # drop pkt if CRC fails
       {0x38, 0x42}, # max 62 byte payload
       {0x3C, 0x8F}, # fifo thres
       {0x3D, 0x12}, # PacketConfig2, interpkt = 1, autorxrestart on
@@ -145,9 +154,11 @@ defmodule AleRFM69 do
 
   def handle_call({:reset_module}, _from, state), do: {:reply,reset(@reset), state}
 
+  # do a restart on the receiver
   defp reset_receiver(pid) do
-    switch_opmode(pid, :standby)
-    switch_opmode(pid, :rx)
+    #switch_opmode(pid, :standby)
+    #switch_opmode(pid, :rx)
+    write_register {0x3d, 0x16}, pid
   end
 
   def handle_info({:gpio_interrupt, _pin, :falling}, state) do
@@ -156,6 +167,7 @@ defmodule AleRFM69 do
   end
 
   def handle_info({:gpio_interrupt, pin, :rising = dir}, %{pid: pid, int: int} = state) do
+    :interrupts |> Stats.add_type
     case wait_for( fn() -> 
         case read_2register(0x27, pid) do
           << _::size(13), 1::size(1), _::size(2)  >>=reg -> reg
@@ -165,8 +177,10 @@ defmodule AleRFM69 do
       end, 12) do
       :timeout -> Logger.info "Receiving aborted: timeout"
                   reset_receiver(pid)
+                  :timeout |> Stats.add_type
                   :timeout
       :carrier_lost -> Logger.warn "Receiving aborted: carrier lost"
+                  :timeout |> Stats.add_type
                   :carrier_lost
       res      -> rssi = read_register(0x24, pid) |> reg_to_uint |> Kernel.*(-0.5)
                   << fei::integer-signed-size(16) >> = read_2register(0x21, pid)
@@ -176,8 +190,10 @@ defmodule AleRFM69 do
                     << _::size(14), 1::size(1), _::size(1) >> ->
 		         << _ :: size(8), len :: size(8),  payload :: binary-size(len), _::binary >> = data
                          res = for << d :: size(8) <- payload >>, do: d |> Integer.to_string( 16) |> String.pad_leading(2, "0")
+                         :crc_ok |> Stats.add_type
                          Logger.info "#{stats}: (len #{len}) #{res |> Enum.join(" ")}"
 		    _ -> Logger.info "#{stats}: CRC invalid on: #{inspect data}"
+                         :crc_failed |> Stats.add_type
 		  end
     end
     case Gpio.read(int) do
